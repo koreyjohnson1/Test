@@ -11,6 +11,9 @@ const {
   AudienceMismatchError,
 } = require("./errors");
 
+// Use a positive allowlist instead of rejecting only "none".
+// A denylist is unsafe because attackers can switch to another unexpected
+// algorithm, such as HS256, and attempt algorithm-confusion attacks.
 const ALLOWED_ALGORITHMS = new Set(["RS256"]);
 
 function base64urlToBuffer(value) {
@@ -18,8 +21,15 @@ function base64urlToBuffer(value) {
     throw new MalformedTokenError("Invalid base64url value");
   }
 
-  const padded = value.padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
-  return Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  const padded = value.padEnd(
+    value.length + ((4 - (value.length % 4)) % 4),
+    "="
+  );
+
+  return Buffer.from(
+    padded.replace(/-/g, "+").replace(/_/g, "/"),
+    "base64"
+  );
 }
 
 function decodeJsonSegment(segment) {
@@ -38,6 +48,16 @@ function validateAudience(tokenAudience, expectedAudience) {
   return tokenAudience === expectedAudience;
 }
 
+function findSigningKey(jwks, kid) {
+  return jwks.keys.find(
+    (key) =>
+      key.kid === kid &&
+      key.kty === "RSA" &&
+      (!key.use || key.use === "sig") &&
+      (!key.alg || key.alg === "RS256")
+  );
+}
+
 async function validateToken(token, options) {
   const {
     jwksUri,
@@ -45,6 +65,7 @@ async function validateToken(token, options) {
     audience,
     clockSkewSeconds = 30,
     jwksCacheTtlSeconds = 300,
+    jwksForcedRefreshCooldownSeconds = 30,
   } = options || {};
 
   if (!jwksUri || !issuer || !audience) {
@@ -56,8 +77,11 @@ async function validateToken(token, options) {
   }
 
   const parts = token.split(".");
+
   if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
-    throw new MalformedTokenError("JWT must contain header, payload, and signature");
+    throw new MalformedTokenError(
+      "JWT must contain header, payload, and signature"
+    );
   }
 
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
@@ -73,11 +97,17 @@ async function validateToken(token, options) {
   }
 
   let jwks = await getJwks(jwksUri, jwksCacheTtlSeconds);
-  let jwk = jwks.keys.find((key) => key.kid === header.kid);
+  let jwk = findSigningKey(jwks, header.kid);
 
   if (!jwk) {
-    jwks = await getJwks(jwksUri, jwksCacheTtlSeconds, true);
-    jwk = jwks.keys.find((key) => key.kid === header.kid);
+    jwks = await getJwks(
+      jwksUri,
+      jwksCacheTtlSeconds,
+      true,
+      jwksForcedRefreshCooldownSeconds
+    );
+
+    jwk = findSigningKey(jwks, header.kid);
   }
 
   if (!jwk) {
@@ -85,6 +115,7 @@ async function validateToken(token, options) {
   }
 
   let publicKey;
+
   try {
     publicKey = crypto.createPublicKey({
       key: jwk,

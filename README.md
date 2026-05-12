@@ -7,6 +7,7 @@ It includes:
 - A self-contained JWT validation module using RS256 and JWKS.
 - Typed JWT validation errors.
 - JWKS caching with bounded TTL behavior.
+- Controlled JWKS forced-refresh behavior for unknown `kid` values.
 - Express authorization middleware for authentication, scopes, roles, and ownership checks.
 - Tests for JWT validation and protected document routes.
 - Written protocol/security responses in `RESPONSES.md`.

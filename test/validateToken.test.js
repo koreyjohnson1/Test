@@ -11,6 +11,7 @@ const {
   UnknownKeyError,
   InvalidSignatureError,
   MalformedTokenError,
+  JwksFetchError,
 } = require("../src/jwt/errors");
 
 function base64url(input) {
@@ -41,6 +42,7 @@ describe("validateToken", () => {
   let privateKey;
   let publicJwk;
   let requestCount;
+  let serverMode;
 
   const issuer = "https://issuer.example.com/";
   const audience = "api://documents";
@@ -48,6 +50,7 @@ describe("validateToken", () => {
   beforeEach((done) => {
     clearJwksCache();
     requestCount = 0;
+    serverMode = "ok";
 
     const pair = crypto.generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -61,6 +64,20 @@ describe("validateToken", () => {
 
     server = http.createServer((req, res) => {
       requestCount += 1;
+
+      if (serverMode === "error") {
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "jwks unavailable" }));
+        return;
+      }
+
+      if (serverMode === "invalid") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ notKeys: [] }));
+        return;
+      }
+
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ keys: [publicJwk] }));
     });
@@ -238,5 +255,45 @@ describe("validateToken", () => {
     await validateToken(validToken(), options());
 
     expect(requestCount).toBe(1);
+  });
+
+  test("unknown kid triggers controlled refresh only once during cooldown", async () => {
+    const tokenOne = validToken({
+      header: {
+        kid: "unknown-key-one",
+      },
+    });
+
+    const tokenTwo = validToken({
+      header: {
+        kid: "unknown-key-two",
+      },
+    });
+
+    await expect(validateToken(tokenOne, options())).rejects.toBeInstanceOf(
+      UnknownKeyError
+    );
+
+    await expect(validateToken(tokenTwo, options())).rejects.toBeInstanceOf(
+      UnknownKeyError
+    );
+
+    expect(requestCount).toBe(2);
+  });
+
+  test("JWKS fetch failure throws JwksFetchError", async () => {
+    serverMode = "error";
+
+    await expect(validateToken(validToken(), options())).rejects.toBeInstanceOf(
+      JwksFetchError
+    );
+  });
+
+  test("invalid JWKS response throws JwksFetchError", async () => {
+    serverMode = "invalid";
+
+    await expect(validateToken(validToken(), options())).rejects.toBeInstanceOf(
+      JwksFetchError
+    );
   });
 });
